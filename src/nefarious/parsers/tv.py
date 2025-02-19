@@ -253,7 +253,7 @@ class TVParser(ParserBase):
         self.match = matches[0]
 
         # single title
-        if 'title' in self.match:
+        if 'title' in self.match and self.match['title']:
             self.match['title'] = self.normalize_media_title(self.match['title'][0])
         else:
             self.match['title'] = ''
@@ -271,13 +271,7 @@ class TVParser(ParserBase):
             for i, episode in enumerate(self.match['episode']):
                 self.match['episode'][i] = self.normalize_season_episode(episode)
 
-        # quality
-        title_quality = self.parse_quality(self.title_query)
-        self.match['quality'] = title_quality.name
-        self.match['resolution'] = self.parse_resolution(self.title_query)
-
-        # hardcoded subs
-        self.match['hc'] = self.parse_hardcoded_subs()
+        self.parse_tags()
 
         return self.match
 
