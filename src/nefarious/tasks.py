@@ -1,8 +1,8 @@
 import os
-
+import pytz
 from celery import chain
 from celery.signals import task_failure
-from datetime import datetime
+from datetime import datetime, timedelta
 from celery_once import QueueOnce
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -52,6 +52,10 @@ app.conf.beat_schedule = {
         'task': 'nefarious.tasks.populate_release_dates_task',
         'schedule': 60 * 60 * 24 * 1,
     },
+    'Stuck Download Handling': {
+        'task': 'nefarious.tasks.process_stuck_downloads_task',
+        'schedule': 60 * 60 * 24 * 1,
+    },
 }
 
 
@@ -63,9 +67,16 @@ def log_exception(**kwargs):
 @app.task(base=QueueOnce, once={'graceful': True})
 def watch_tv_show_season_task(watch_tv_season_id: int):
     processor = WatchTVSeasonProcessor(watch_media_id=watch_tv_season_id)
-    success = processor.fetch()
-
     watch_tv_season = get_object_or_404(WatchTVSeason, pk=watch_tv_season_id)
+
+    # skip attempt if media hasn't been released yet
+    if watch_tv_season.release_date and watch_tv_season.release_date > datetime.now().date():
+        logger_background.warning('skipping search for tv season "{}" since it has not been released yet ({})'.format(
+            watch_tv_season, watch_tv_season.release_date))
+        return
+
+    # make attempt
+    success = processor.fetch()
 
     # success so update the season request instance as "collected"
     if success:
@@ -132,7 +143,7 @@ def refresh_tmdb_configuration():
     return nefarious_settings.tmdb_configuration
 
 
-@app.task
+@app.task(base=QueueOnce, once={'graceful': True})
 def completed_media_task():
     nefarious_settings = NefariousSettings.get()
     transmission_client = get_transmission_client(nefarious_settings)
@@ -159,44 +170,46 @@ def completed_media_task():
 
                 logger_background.info('Media completed: {}'.format(media))
 
-                # run video detection, if enabled, on the relevant video files for movies, staging_path
-                if nefarious_settings.enable_video_detection and isinstance(media, WatchMovie):
+                # get the sub path (e.g. "movies/", "tv/') so we can move the data from staging
+                sub_path = str(
+                    nefarious_settings.transmission_movie_download_dir if isinstance(media, WatchMovie)
+                    else nefarious_settings.transmission_tv_download_dir
+                ).lstrip('/')
+
+                # run video detection, if enabled, on movies and tv seasons
+                if nefarious_settings.enable_video_detection and isinstance(media, (WatchMovie, WatchTVSeason, WatchTVEpisode)):
                     logger_background.info("[VIDEO_DETECTION] verifying '{}'".format(media))
                     staging_path = os.path.join(
-                        settings.INTERNAL_DOWNLOAD_PATH,
-                        settings.UNPROCESSED_PATH,
-                        nefarious_settings.transmission_movie_download_dir.lstrip('/'),
+                        str(settings.INTERNAL_DOWNLOAD_PATH),
+                        str(settings.UNPROCESSED_PATH),
+                        sub_path,
                         torrent.name,
                     )
                     try:
                         if VideoDetect.has_valid_video_in_path(staging_path):
                             logger_background.info("[VIDEO_DETECTION] '{}' has valid video files".format(media))
                         else:
+                            logger_background.error("[VIDEO_DETECTION] blacklisting '{}' because no valid video was found in {}".format(media, staging_path))
+                            notification.send_message('blacklisting media {} because no valid videos found ({}: {})'.format(media, torrent.name, media.transmission_torrent_hash))
                             blacklist_media_and_retry(media)
-                            logger_background.error("[VIDEO_DETECTION] blacklisting '{}' because no valid video was found: {}".format(media, staging_path))
                             continue
                     except Exception as e:
                         logger_background.exception(e)
                         logger_background.error('error during video detection for {} with path {}'.format(media, staging_path))
 
-                # get the sub path (ie. "movies/", "tv/') so we can move the data from staging
-                sub_path = (
-                    nefarious_settings.transmission_movie_download_dir if isinstance(media, WatchMovie)
-                    else nefarious_settings.transmission_tv_download_dir
-                ).lstrip('/')
+                is_torrent_single_file = len(torrent.files()) == 1
 
                 # get the path and updated name for the data
-                new_path, new_name = get_media_new_path_and_name(media, torrent.name, len(torrent.files()) == 1)
+                new_path, new_name = get_media_new_path_and_name(media, torrent.name, is_torrent_single_file)
                 relative_path = os.path.join(
-                    sub_path,  # i.e "movies" or "tv"
+                    sub_path,  # e.g. "movies" or "tv"
                     new_path or '',
                 )
 
                 # move the data to a new location
-                transmission_session = transmission_client.session_stats()
                 transmission_move_to_path = os.path.join(
-                    transmission_session.download_dir,
-                    relative_path,
+                    transmission_client.session.download_dir, # .e.g. "/downloads"
+                    relative_path,  # e.g. "movies/Batman (2000)/"
                 )
                 logger_background.info('Moving torrent data to "{}"'.format(transmission_move_to_path))
                 torrent.move_data(transmission_move_to_path)
@@ -231,13 +244,20 @@ def completed_media_task():
                 notification.send_message(message='{} was downloaded'.format(media))
 
                 # define the import path
-                import_path = os.path.join(
-                    settings.INTERNAL_DOWNLOAD_PATH,
-                    relative_path,
-                    # for movies: new_path will be None if the torrent is already a directory so fall back to the new name
-                    # for tv: new_path will be the show, so we really want the new_name which will be the season
-                    new_path or new_name if isinstance(media, WatchMovie) else new_name,
-                )
+                if media_type == MEDIA_TYPE_MOVIE:
+                    import_path = os.path.join(
+                        settings.INTERNAL_DOWNLOAD_PATH,
+                        relative_path,
+                        # torrent is a directory: new_path will be None
+                        # torrent is a single file: relative_path is accurate so don't append anything else
+                        new_path or new_name if not is_torrent_single_file else '',
+                    )
+                else:  # tv
+                    import_path = os.path.join(
+                        settings.INTERNAL_DOWNLOAD_PATH,
+                        relative_path,
+                        new_name,
+                    )
 
                 # post-tasks
                 post_tasks = [
@@ -288,7 +308,7 @@ def wanted_media_task():
 
     for media_type, data in wanted_media_data.items():
         for media in data['query']:
-            # media has been released (or it's missing it's release date so try anyway) so create a task to try and fetch it
+            # media has been released (or it's missing its release date so try anyway) so create a task to try and fetch it
             if not media.release_date or media.release_date <= today:
                 logger_background.info('Wanted {type}: {media}'.format(type=media_type, media=media))
                 # queue task for wanted media
@@ -426,7 +446,7 @@ def import_library_task(media_type: str, user_id: int, sub_path: str = None):
     tmdb_client = get_tmdb_client(nefarious_settings=nefarious_settings)
 
     if media_type == 'movie':
-        root_path = os.path.join(settings.INTERNAL_DOWNLOAD_PATH, nefarious_settings.transmission_movie_download_dir)
+        root_path = str(os.path.join(settings.INTERNAL_DOWNLOAD_PATH, nefarious_settings.transmission_movie_download_dir))
         importer = MovieImporter(
             nefarious_settings=nefarious_settings,
             root_path=root_path,
@@ -434,7 +454,7 @@ def import_library_task(media_type: str, user_id: int, sub_path: str = None):
             user=user,
         )
     else:
-        root_path = os.path.join(settings.INTERNAL_DOWNLOAD_PATH, nefarious_settings.transmission_tv_download_dir)
+        root_path = str(os.path.join(settings.INTERNAL_DOWNLOAD_PATH, nefarious_settings.transmission_tv_download_dir))
         importer = TVImporter(
             nefarious_settings=nefarious_settings,
             root_path=root_path,
@@ -444,6 +464,9 @@ def import_library_task(media_type: str, user_id: int, sub_path: str = None):
 
     # prefer supplied sub path and fallback to root path
     path = sub_path or root_path
+    # use parent dir if path is a file
+    if os.path.isfile(path):
+        path = os.path.dirname(path)
 
     logger_background.info('Importing {} library at {}'.format(media_type, path))
 
@@ -474,7 +497,7 @@ def populate_release_dates_task():
         try:
             season_result = tmdb_client.TV_Seasons(media.watch_tv_show.tmdb_show_id, media.season_number)
             data = season_result.info()
-            release_date = parse_date(data.get('air_date', ''))
+            release_date = parse_date(data.get('air_date') or '')
             update_media_release_date(media, release_date)
         except Exception as e:
             logger_background.exception(e)
@@ -483,7 +506,7 @@ def populate_release_dates_task():
         try:
             episode_result = tmdb_client.TV_Episodes(media.watch_tv_show.tmdb_show_id, media.season_number, media.episode_number)
             data = episode_result.info()
-            release_date = parse_date(data.get('air_date', ''))
+            release_date = parse_date(data.get('air_date') or '')
             update_media_release_date(media, release_date)
         except Exception as e:
             logger_background.exception(e)
@@ -512,3 +535,29 @@ def queue_download_subtitles_for_season_task(watch_season_id: int):
     watch_season = get_object_or_404(WatchTVSeason, id=watch_season_id)  # type: WatchTVSeason
     for watch_episode in watch_season.watch_tv_show.watchtvepisode_set.filter(season_number=watch_season.season_number):
         download_subtitles_task.delay(MEDIA_TYPE_TV_EPISODE, watch_episode.id)
+
+
+@app.task
+def process_stuck_downloads_task():
+    # find media that's been "stuck" downloading for X days and blacklist (if setting is enabled)
+    nefarious_settings = NefariousSettings.get()
+    if nefarious_settings.stuck_download_handling_enabled:
+        stuck_media_type_queries = [
+            WatchMovie.objects.all(),
+            WatchTVSeason.objects.all(),
+            WatchTVEpisode.objects.all(),
+        ]
+        for query in stuck_media_type_queries:
+            # torrent found, not collected, and older than X days
+            exclude_kwargs = dict(transmission_torrent_hash__isnull=True)
+            filter_kwargs = dict(
+                collected=False,
+                last_attempt_date__lt=datetime.utcnow().replace(tzinfo=pytz.UTC) - timedelta(days=nefarious_settings.stuck_download_handling_days),
+            )
+            for media in query.exclude(**exclude_kwargs).filter(**filter_kwargs):
+                msg = 'blacklisting stuck media "{media}" since it has been trying to download for longer than {stuck_download_handling_days} days'.format(
+                    media=media, stuck_download_handling_days=nefarious_settings.stuck_download_handling_days,
+                )
+                logger_background.info(msg)
+                notification.send_message(msg)
+                blacklist_media_and_retry(media)

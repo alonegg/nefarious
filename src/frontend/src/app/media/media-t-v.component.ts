@@ -5,7 +5,7 @@ import { ApiService } from '../api.service';
 import { ToastrService } from 'ngx-toastr';
 import { forkJoin, Observable, Subscription } from 'rxjs';
 import { catchError, concatMap, first, tap } from 'rxjs/operators';
-import { FormBuilder, FormControl, FormGroup } from '@angular/forms';
+import { UntypedFormBuilder, UntypedFormControl, UntypedFormGroup } from '@angular/forms';
 
 
 @Component({
@@ -18,10 +18,10 @@ export class MediaTVComponent implements OnInit, OnDestroy {
   public isManuallySearching = false;
   public isManualSearchEnabled = false;
   public autoWatchFutureSeasons = false;
-  public watchEpisodesFormGroup: FormGroup;
+  public watchEpisodesFormGroup: UntypedFormGroup;
   public manualSearchTmdbSeason: any;
   public manualSearchTmdbEpisode: any;
-  public qualityProfileControl: FormControl;
+  public qualityProfileControl: UntypedFormControl;
   public isLoading = true;
   public isSaving = false;
   public activeNav = 'details';
@@ -33,7 +33,7 @@ export class MediaTVComponent implements OnInit, OnDestroy {
     private apiService: ApiService,
     private toastr: ToastrService,
     private ngZone: NgZone,
-    private fb: FormBuilder,
+    private fb: UntypedFormBuilder,
   ) {
   }
 
@@ -52,15 +52,15 @@ export class MediaTVComponent implements OnInit, OnDestroy {
         }
 
         // define quality profile form control and watch for changes
-        this.qualityProfileControl = new FormControl(
-          (watchShow && watchShow.quality_profile_custom) ?
-            watchShow.quality_profile_custom :
+        this.qualityProfileControl = new UntypedFormControl(
+          (watchShow && watchShow.quality_profile) ?
+            watchShow.quality_profile :
             this.apiService.settings.quality_profile_tv
         );
         this.qualityProfileControl.valueChanges.subscribe((qualityProfile) => {
           watchShow = this._getWatchShow();
           if (watchShow) {
-            this.apiService.updateWatchTVShow(watchShow.id, {quality_profile_custom: qualityProfile})
+            this.apiService.updateWatchTVShow(watchShow.id, {quality_profile: qualityProfile})
               .subscribe(() => {
                 this.toastr.success('Updated quality profile');
               }, (error) => {
@@ -352,8 +352,12 @@ export class MediaTVComponent implements OnInit, OnDestroy {
     }
   }
 
-  public qualityProfiles(): string[] {
+  public qualityProfiles(): any[] {
     return this.apiService.qualityProfiles;
+  }
+
+  public trackByProfile(index: number, item: any) {
+    return item.id;
   }
 
   protected _watchShow(autoWatchNewSeasons?: boolean): Observable<any> {
@@ -398,7 +402,7 @@ export class MediaTVComponent implements OnInit, OnDestroy {
       for (const episode of season.episodes) {
 
         // episode form control
-        const control = new FormControl({
+        const control = new UntypedFormControl({
           value: this.isWatchingEpisode(episode.id) || this.isWatchingSeason(season),
           disabled: this.isWatchingSeasonRequest(season) || (
             this.isWatchingEpisode(episode.id) && !this.canUnWatchEpisode(episode.id)),
@@ -420,7 +424,7 @@ export class MediaTVComponent implements OnInit, OnDestroy {
     // update episode form
     if (this.watchEpisodesFormGroup) {
       Object.keys(this.watchEpisodesFormGroup.controls).forEach((name) => {
-        const existingControl = <FormControl>this.watchEpisodesFormGroup.controls[name];
+        const existingControl = <UntypedFormControl>this.watchEpisodesFormGroup.controls[name];
         const newControl = watchingControls[name];
         existingControl.setValue(newControl.value, {emitEvent: false});
         if (newControl.enabled) {

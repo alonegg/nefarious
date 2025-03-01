@@ -54,7 +54,7 @@ Sometimes you want more control about which torrent is chosen for download.
 
 ## Blacklist & Retry a torrent
 
-Sometimes a movie or tv show you download may be too low quality, wrong match, wrong sub-titles, or just completely fake.
+Sometimes a movie or tv show you download may be too low quality, wrong match, wrong subtitles, or just completely fake.
 You can tell nefarious to blacklist & delete that torrent and search again to find the next best option.
 
 - click the **Status** tab on a movie or tv show
@@ -73,11 +73,21 @@ If you want to see the logs you can run:
 ## Notifications
 
 nefarious can send notifications (e.g. push notifications, email, sms) when media is downloaded.   
-See [Apprise](https://github.com/caronc/apprise) for documentation on how to construct the *Notification Url* for
-the [available notification services](https://github.com/caronc/apprise#popular-notification-services).
+See [Apprise](https://github.com/caronc/apprise/tree/v0.9.3) for documentation on how to construct the *Notification Url* for
+the [available notification services](https://github.com/caronc/apprise/tree/v0.9.3#popular-notification-services).
 
 Enter the *Notification Url* on the settings page.  You can test it from there to make sure it works as expected.
 
 Something like: `slack://TokenA/TokenB/TokenC/`
 
 You'll receive a notification everytime new media is downloaded.
+
+## Detect fake/spam movies
+
+Sometimes a torrent movie will be a single frame across the entire video advertising spam or something similar.  You can enable the feature to automatically
+try and detect when this happens and blacklist/retry a new version. The default setting is `Disabled`;
+
+## Handle "Stuck" Torrents
+
+Occasionally a torrent will be found but never complete.  You can enable a setting to automatically detect "stuck" torrents that never completed after
+X days and blacklist them.  The default setting is `Disabled`;

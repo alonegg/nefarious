@@ -1,37 +1,35 @@
-import { EMPTY } from 'rxjs';
-import { ChangeDetectorRef } from '@angular/core';
-import { ToastrService } from 'ngx-toastr';
-import { ApiService } from '../api.service';
-import { FormArray, FormBuilder, FormControl, Validators } from '@angular/forms';
-import { Component, OnInit, AfterContentChecked } from '@angular/core';
-import { concat, Observable, Subscription } from 'rxjs';
-import { tap } from 'rxjs/operators';
+import {EMPTY} from 'rxjs';
+import {ToastrService} from 'ngx-toastr';
+import {ApiService} from '../api.service';
+import {FormArray, FormBuilder, FormControl, Validators, FormRecord} from '@angular/forms';
+import {Component, OnInit} from '@angular/core';
+import {concat, Observable, Subscription} from 'rxjs';
+import {tap} from 'rxjs/operators';
+import {NgbModal} from "@ng-bootstrap/ng-bootstrap";
+import {QualityProfilesComponent} from "./quality-profiles.component";
+
 
 @Component({
   selector: 'app-settings',
   templateUrl: './settings.component.html',
   styleUrls: ['./settings.component.css']
 })
-export class SettingsComponent implements OnInit, AfterContentChecked {
+export class SettingsComponent implements OnInit {
   public users: any[];
-  public form;
+  public form: FormRecord<any>;
   public isSaving = false;
   public isLoading = false;
-  public isVeryingJackettIndexers = false;
+  public isVerifyingJackettIndexers = false;
   public isLoadingUsers = false;
   public gitCommit = '';
   public authenticateOpenSubtitles$: Subscription;
 
   constructor(
     public apiService: ApiService,
-    private toastr: ToastrService,
-    private fb: FormBuilder,
-    private changeDectorRef: ChangeDetectorRef
-  ) { }
-
-  ngAfterContentChecked() {
-    // handles form "required" dynamically changing after lifecycle check
-    this.changeDectorRef.detectChanges();
+    public toastr: ToastrService,
+    public fb: FormBuilder,
+    public modalService: NgbModal,
+  ) {
   }
 
   ngOnInit() {
@@ -40,6 +38,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
       'jackett_host': [settings['jackett_host'], Validators.required],
       'jackett_port': [settings['jackett_port'], Validators.required],
       'jackett_token': [settings['jackett_token'], Validators.required],
+      'jackett_filter_index': [settings['jackett_filter_index']],
       'transmission_host': [settings['transmission_host'], Validators.required],
       'transmission_port': [settings['transmission_port'], Validators.required],
       'transmission_user': [settings['transmission_user']],
@@ -57,6 +56,9 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
       'language': [settings['language'], Validators.required],
       'users': new FormArray([]),
       'apprise_notification_url': [settings['apprise_notification_url']],
+      'preferred_media_category': [settings['preferred_media_category'], Validators.required],
+      'stuck_download_handling_enabled': [settings['stuck_download_handling_enabled'], Validators.required],
+      'stuck_download_handling_days': [settings['stuck_download_handling_days'], Validators.required],
     });
 
     this.isLoadingUsers = true;
@@ -70,7 +72,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
           Object.keys(user).forEach((key) => {
             controls[key] = new FormControl(user[key]);
           });
-          this.form.get('users').insert(0, this.fb.group(controls));
+          this.form.controls.users.insert(0, this.fb.group(controls));
         });
       }, (error) => {
         this.toastr.error('An unknown error occurred loading users');
@@ -89,7 +91,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
   }
 
   public hasExclusions(): boolean {
-    const exclusions = this.form.get('exclusions').value;
+    const exclusions = this.form.controls.exclusions.value;
     return exclusions && exclusions.length;
   }
 
@@ -109,12 +111,16 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
     ).subscribe();
   }
 
-  public qualityProfiles(): string[] {
+  public qualityProfiles(): any[] {
     return this.apiService.qualityProfiles;
   }
 
+  public mediaCategories(): string[] {
+    return this.apiService.mediaCategories;
+  }
+
   public addUser() {
-    this.form.get('users').push(this.fb.group({
+    this.form.controls.users.push(this.fb.group({
       username: ['', Validators.required],
       password: ['', Validators.required],
       can_immediately_watch_movies: [false],
@@ -124,7 +130,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
 
   public saveUser(index: number) {
 
-    const userControl = this.form.get('users').controls[index];
+    const userControl = this.form.controls.users.controls[index];
     if (!userControl.valid) {
       this.toastr.error('Please supply all required fields for this user');
       return;
@@ -145,7 +151,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
       this.apiService.createUser(userControl.value.username, userControl.value.password).subscribe(
         (data) => {
           this.toastr.success(`Added ${userControl.value.username}`);
-          this.form.get('users').at(index).addControl('id', new FormControl(data.id));
+          this.form.controls.users.at(index).addControl('id', new FormControl(data.id));
         },
         (error) => {
           this.toastr.error(`An unknown error occurred adding user ${userControl.value.username}`);
@@ -156,11 +162,11 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
   }
 
   public removeUser(index: number) {
-    const userControl = this.form.get('users').controls[index];
+    const userControl = this.form.controls.users.controls[index];
     this.apiService.deleteUser(userControl.value.id).subscribe(
       (data) => {
         this.toastr.success(`Successfully deleted ${userControl.value.username}`);
-        this.form.get('users').removeAt(index);
+        this.form.controls.users.removeAt(index);
       },
       (error) => {
         this.toastr.error(`An unknown error occurred deleting user ${userControl.value.username}`);
@@ -170,7 +176,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
   }
 
   public canDeleteUser(index: number) {
-    const userControl = this.form.get('users').controls[index];
+    const userControl = this.form.controls.users.controls[index];
     return userControl.get('id') && this.apiService.user.id !== userControl.get('id').value;
   }
 
@@ -207,8 +213,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
       'open_subtitles_auto',
       'open_subtitles_username',
       'open_subtitles_password',
-    ].
-    forEach((key) => {
+    ].forEach((key) => {
       params[key] = this.form.value[key];
     });
 
@@ -226,12 +231,12 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
       ),
       this.apiService.fetchSettings(),
     ).subscribe(
-        (data: any) => {
-        }, (error) => {
-          console.error(error);
-          this.toastr.error(error_message);
-        }
-      );
+      (data: any) => {
+      }, (error) => {
+        console.error(error);
+        this.toastr.error(error_message);
+      }
+    );
   }
 
   public queueTask(task: string): void {
@@ -280,6 +285,17 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
         this.isSaving = false;
       }
     })
+  }
+
+  public manageQualityProfiles() {
+    this.modalService.open(QualityProfilesComponent, {
+      size: "lg",
+      scrollable: true,
+    });
+  }
+
+  public trackByProfile(index: number, item: any) {
+    return item.id;
   }
 
   protected _saveSettings(): Observable<any> {
@@ -357,7 +373,7 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
   }
 
   protected _verifyJackettIndexers() {
-    this.isVeryingJackettIndexers = true;
+    this.isVerifyingJackettIndexers = true;
     this.apiService.verifyJackettIndexers().subscribe(
       (data: any[]) => {
         const failedIndexers = data.filter((indexer: any) => {
@@ -370,11 +386,11 @@ export class SettingsComponent implements OnInit, AfterContentChecked {
         } else {
           this.toastr.success('All indexers were successful');
         }
-        this.isVeryingJackettIndexers = false;
+        this.isVerifyingJackettIndexers = false;
       },
       (error) => {
         this.toastr.error('An unknown error occurred verifying jackett indexers');
-        this.isVeryingJackettIndexers = false;
+        this.isVerifyingJackettIndexers = false;
       },
     );
   }
